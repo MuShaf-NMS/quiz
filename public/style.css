@@ -1,0 +1,38 @@
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,sans-serif;background:#46178f;color:#fff;min-height:100vh}
+.wrap{max-width:900px;margin:0 auto;padding:20px}
+.card{background:#fff;color:#222;border-radius:10px;padding:16px;margin:12px 0}
+h1,h2,h3{margin:.3em 0}
+input,select,textarea,button{font:inherit;padding:10px;border-radius:8px;border:1px solid #ccc}
+input,textarea,select{width:100%}
+textarea{min-height:60px}
+button{cursor:pointer;background:#1368ce;color:#fff;border:0;font-weight:600}
+button:hover{filter:brightness(1.1)}
+button.sec{background:#eee;color:#333}
+button.red{background:#e21b3c}
+button.green{background:#26890c}
+button:disabled{opacity:.5;cursor:default}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.row>*{flex:1}
+.row>.fit{flex:0 0 auto}
+.center{text-align:center}
+.big{font-size:3rem;font-weight:800;letter-spacing:.1em}
+.opts{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:14px 0}
+.opt{padding:22px 12px;font-size:1.2rem;border-radius:8px;color:#fff;text-align:center;font-weight:700;border:4px solid transparent}
+.opt.c0{background:#e21b3c}.opt.c1{background:#1368ce}.opt.c2{background:#d89e00}.opt.c3{background:#26890c}
+.opt.c4{background:#864cbf}.opt.c5{background:#0aa3a3}.opt.c6{background:#c2185b}.opt.c7{background:#555}
+.opt.sel{border-color:#fff;box-shadow:0 0 0 4px #000a}
+.opt.dim{opacity:.3}
+.opt.ok{border-color:#fff;box-shadow:0 0 0 4px #26890c}
+.bar{height:10px;background:#fff3;border-radius:5px;overflow:hidden;margin:8px 0}
+.bar>i{display:block;height:100%;background:#fff}
+.lb div{display:flex;justify-content:space-between;background:#fff2;padding:8px 12px;border-radius:6px;margin:4px 0}
+.chips span{display:inline-block;background:#fff2;padding:6px 12px;border-radius:20px;margin:3px}
+.qimg{max-width:100%;max-height:260px;border-radius:8px;display:block;margin:8px auto}
+.buzz{width:100%;height:50vh;font-size:3rem;border-radius:20px;background:#e21b3c}
+.q-edit{border:1px solid #ddd;border-radius:8px;padding:10px;margin:10px 0;background:#fafafa}
+.small{font-size:.85rem;opacity:.7}
+.err{color:#ffd0d0;margin-top:8px}
+label.ck{display:flex;gap:6px;align-items:center;flex:0 0 auto}
+label.ck input{width:auto}
+@media(max-width:600px){.opts{grid-template-columns:1fr}.big{font-size:2rem}}

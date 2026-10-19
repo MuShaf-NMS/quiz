@@ -1,0 +1,12 @@
+services:
+  quiz:
+    build: .
+    ports:
+      - "3000:3000"
+    env_file: .env
+    environment:
+      PORT: 3000
+      DB_HOST: host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped

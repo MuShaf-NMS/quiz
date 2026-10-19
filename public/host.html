@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Quiz Host</title><link rel="stylesheet" href="style.css"></head>
+<body><div class="wrap" id="app"></div>
+<script>
+const app = document.getElementById('app');
+const api = (url, body, method) => fetch(url, { method: method || 'POST', headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined }).then((r) => r.json());
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+let Q = null, S = null, room = JSON.parse(localStorage.getItem('quiz-host') || 'null'), es, tick, deadline;
+// browser menutup EventSource saat reload/pindah halaman (readyState 2) — jangan dianggap game hilang
+let leaving = false;
+addEventListener('beforeunload', () => { leaving = true; });
+addEventListener('pagehide', () => { leaving = true; });
+addEventListener('pageshow', () => { leaving = false; });
+
+// ---------- login ----------
+const _fetch = window.fetch;
+window.fetch = async (...a) => {
+  const r = await _fetch(...a);
+  if (r.status === 401 && !/\/api\/(login|me)/.test(String(a[0]))) { loginView(); throw new Error('Belum login'); }
+  return r;
+};
+function loginView(err) {
+  if (es) es.close();
+  clearInterval(tick);
+  app.innerHTML = `<div class="center"><h1>🎯 Login Host</h1><div class="card" style="max-width:360px;margin:12px auto">
+  <input id="u" placeholder="Username" autocomplete="username"><br><br>
+  <input id="p" type="password" placeholder="Password" autocomplete="current-password"><br><br>
+  <button id="go" style="width:100%">Masuk</button><div class="err" style="color:#c00">${esc(err || '')}</div></div></div>`;
+  const go = async () => {
+    const r = await _fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: u.value, password: p.value }) });
+    const d = await r.json();
+    if (!r.ok) return loginView(d.error);
+    boot();
+  };
+  document.getElementById('go').onclick = go;
+  p.onkeydown = (e) => { if (e.key === 'Enter') go(); };
+  u.focus();
+}
+async function logout() { await api('/api/logout'); localStorage.removeItem('quiz-host'); room = null; loginView(); }
+async function changePw() {
+  const old = prompt('Password lama:'); if (old === null) return;
+  const nw = prompt('Password baru (minimal 6 karakter):'); if (nw === null) return;
+  const r = await api('/api/password', { old, new: nw });
+  alert(r.error || 'Password berhasil diganti');
+}
+async function boot() {
+  const r = await _fetch('/api/me');
+  if (!r.ok) return loginView();
+  const m = await r.json(); me = m.username; role = m.role;
+  if (room) resume(); else list();
+}
+let me = '', role = '';
+
+async function usersView() {
+  const us = await fetch('/api/users').then((r) => r.json());
+  app.innerHTML = `<h1>👥 Kelola User</h1><div class="card"><button class="sec" onclick="list()">← Kembali</button>
+  <h2>User</h2>${us.map((u) => `<div class="row" style="margin:6px 0"><b>${esc(u.username)}</b>
+    <select class="fit" style="width:auto" onchange="userAct(${u.id},{role:this.value})"><option value="host" ${u.role === 'host' ? 'selected' : ''}>host</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>admin</option></select>
+    <button class="fit sec" onclick="resetPw(${u.id},'${esc(u.username)}')">Reset password</button>
+    <button class="fit red" onclick="delUser(${u.id},'${esc(u.username)}')">Hapus</button></div>`).join('')}
+  <h2>Tambah user</h2><div class="row"><input id="nu" placeholder="Username" autocomplete="off"><input id="np" type="password" placeholder="Password (min 6)" autocomplete="new-password">
+  <select id="nr" class="fit" style="width:auto"><option value="host">host</option><option value="admin">admin</option></select>
+  <button class="fit green" onclick="addUser()">Tambah</button></div>
+  <p class="small">Host bisa membuat quiz/event dan menjalankan game, tapi tidak bisa mengelola user.</p></div>`;
+}
+async function userAct(id, o) { const r = await api('/api/users/' + id, o); if (r.error) alert(r.error); usersView(); }
+async function resetPw(id, name) { const p = prompt(`Password baru untuk ${name} (min 6):`); if (p) userAct(id, { password: p }); }
+async function delUser(id, name) { if (!confirm(`Hapus user ${name}?`)) return; const r = await api('/api/users/' + id, null, 'DELETE'); if (r.error) alert(r.error); usersView(); }
+async function addUser() {
+  const r = await api('/api/users', { username: nu.value, password: np.value, role: nr.value });
+  if (r.error) return alert(r.error);
+  usersView();
+}
+
+// ---------- quiz list ----------
+let EV = [];
+async function list() {
+  if (es) es.close();
+  const [qs, ev] = await Promise.all([fetch('/api/quizzes').then((r) => r.json()), fetch('/api/events').then((r) => r.json())]);
+  window._qs = qs; EV = ev;
+  const row = (q) => `<div class="row" style="margin:6px 0"><b>${esc(q.title)}</b><span class="fit small">${q.questions.length} soal</span>
+    <button class="fit green" onclick="play('${q.id}')">Mulai game</button>
+    <button class="fit sec" onclick="edit('${q.id}')">Edit</button>
+    <button class="fit red" onclick="del('${q.id}')">Hapus</button></div>`;
+  const sec = (title, quizzes, ev) => `<div class="card"><div class="row"><h2>${esc(title)}</h2>${ev ? `<span class="fit"><button class="green" onclick="results('${ev.id}')">Hasil &amp; skor</button> <button class="sec" onclick="renameEv('${ev.id}')">Ubah nama</button> <button class="red" onclick="delEv('${ev.id}')">Hapus event</button></span>` : ''}</div>
+    ${quizzes.map(row).join('') || '<p class="small">Belum ada quiz.</p>'}</div>`;
+  const loose = qs.filter((q) => !q.eventId);
+  app.innerHTML = `<div class="row"><h1>🎯 Host Quiz</h1><span class="fit small">${esc(me)} (${role}) · ${role === 'admin' ? '<a href="#" style="color:#fff" onclick="usersView();return false">Kelola user</a> · ' : ''}<a href="#" style="color:#fff" onclick="changePw();return false">Ganti password</a> · <a href="#" style="color:#fff" onclick="logout();return false">Keluar</a></span></div>
+  <div class="card"><div class="row"><button onclick="edit()">+ Quiz baru</button><button class="sec" onclick="newEv()">+ Event baru</button>
+  <button class="sec" onclick="importXlsx()">Import Excel</button><a class="fit" href="/api/template.xlsx"><button class="sec">Unduh template</button></a>
+  <button class="sec" onclick="importJson()">Import JSON</button></div>
+  <p class="small">Event = kelompok quiz untuk satu acara. Import Excel otomatis membuat event dan quiz dari template.</p></div>
+  ${EV.map((e) => sec(e.name, qs.filter((q) => q.eventId === e.id), e)).join('')}
+  ${loose.length || !EV.length ? sec(EV.length ? 'Tanpa event' : 'Quiz saya', loose) : ''}
+  ${room ? `<div class="card"><button onclick="resume()">Lanjutkan game PIN ${room.pin}</button></div>` : ''}`;
+}
+async function results(id) {
+  const r = await fetch(`/api/events/${id}/results`).then((x) => x.json());
+  const dt = (d) => new Date(d).toLocaleString('id-ID');
+  app.innerHTML = `<h1>🏆 ${esc(r.event.name)}</h1><div class="card">
+  <div class="row"><button class="fit" onclick="list()">← Kembali</button>
+  <a class="fit" href="/api/events/${id}/export.xlsx"><button class="green" ${r.games.length ? '' : 'disabled'}>Unduh Excel</button></a></div>
+  <h2>Klasemen total</h2>
+  ${r.totals.length ? `<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse"><tr style="text-align:left"><th>#</th><th>Nama</th><th>Total</th>${r.games.map((g) => `<th>${esc(g.title)}</th>`).join('')}</tr>
+  ${r.totals.map((p) => `<tr style="border-top:1px solid #ddd"><td>${p.rank}</td><td>${esc(p.name)}</td><td><b>${p.total}</b></td>${p.perGame.map((v) => `<td>${v ?? '-'}</td>`).join('')}</tr>`).join('')}</table></div>` : '<p class="small">Belum ada game yang dimainkan di event ini.</p>'}
+  <h2>Game yang dimainkan</h2>
+  ${r.games.map((g) => `<div class="row" style="margin:6px 0"><span><b>${esc(g.title)}</b> <span class="small">${dt(g.played_at)} · ${g.players} pemain · ${g.finished ? 'selesai' : `belum selesai (${g.answered}/${g.total} soal)`}</span></span>
+  <a class="fit" href="/api/games/${g.id}/export.xlsx"><button class="sec">Unduh</button></a></div>`).join('') || '<p class="small">-</p>'}</div>`;
+}
+async function newEv() { const name = prompt('Nama event:'); if (name && name.trim()) { await api('/api/events', { name }); list(); } }
+async function renameEv(id) { const e = EV.find((x) => x.id === id); const name = prompt('Nama event:', e.name); if (name && name.trim()) { await api('/api/events', { id, name }); list(); } }
+async function delEv(id) { if (confirm('Hapus event ini? Quiz di dalamnya tidak dihapus, hanya dilepas dari event.')) { await api('/api/events/' + id, null, 'DELETE'); list(); } }
+function importXlsx() {
+  const i = document.createElement('input'); i.type = 'file'; i.accept = '.xlsx';
+  i.onchange = async () => {
+    const r = await fetch('/api/import', { method: 'POST', body: await i.files[0].arrayBuffer() }).then((x) => x.json());
+    if (r.errors) return alert('Import dibatalkan, perbaiki dulu:\n\n' + r.errors.slice(0, 15).join('\n') + (r.errors.length > 15 ? `\n…dan ${r.errors.length - 15} lainnya` : ''));
+    alert(`Import berhasil: ${r.questions} soal, ${r.created} quiz baru, ${r.replaced} quiz diganti, ${r.events} event baru.`);
+    list();
+  };
+  i.click();
+}
+async function del(id) { if (confirm('Hapus quiz?')) { await api('/api/quizzes/' + id, null, 'DELETE'); list(); } }
+async function play(id) {
+  const r = await api('/api/room', { quizId: id });
+  if (r.error) return alert(r.error);
+  room = r; localStorage.setItem('quiz-host', JSON.stringify(r)); resume();
+}
+
+// ---------- editor ----------
+const blank = () => ({ type: 'mc', text: '', image: '', time: 20, points: 1000, penalty: 0, speedBonus: true, session: '', options: ['', '', '', ''], correct: [0], multi: false, accepted: [] });
+function edit(id) {
+  Q = id ? JSON.parse(JSON.stringify(window._qs.find((x) => x.id === id))) : { title: '', questions: [blank()] };
+  editor();
+}
+function editor() {
+  app.innerHTML = `<h1>Editor Quiz</h1><div class="card">
+  <div class="row"><input placeholder="Judul quiz" value="${esc(Q.title)}" oninput="Q.title=this.value">
+  <select onchange="Q.eventId=this.value||null"><option value="">(Tanpa event)</option>${EV.map((e) => `<option value="${e.id}" ${Q.eventId === e.id ? 'selected' : ''}>${esc(e.name)}</option>`).join('')}</select></div>
+  <div id="qs">${Q.questions.map(qForm).join('')}</div>
+  <div class="row"><button class="sec" onclick="addQ()">+ Tambah soal</button></div><br>
+  <div class="row"><button class="green" onclick="saveQ()">Simpan</button>
+  <button class="sec" onclick="exportJson()">Export JSON</button><button class="sec" onclick="list()">Batal</button></div></div>`;
+}
+function qForm(q, i) {
+  const opts = q.type === 'mc' ? `<div class="small">Centang = jawaban benar (boleh lebih dari satu)</div>` +
+    q.options.map((o, j) => `<div class="row" style="margin:4px 0"><label class="ck"><input type="checkbox" ${q.correct.includes(j) ? 'checked' : ''} onchange="tog(${i},${j},this.checked)"></label>
+      <input value="${esc(o)}" placeholder="Pilihan ${j + 1}" oninput="Q.questions[${i}].options[${j}]=this.value">
+      <button class="fit sec" onclick="rmOpt(${i},${j})">✕</button></div>`).join('') +
+    `<div class="row"><button class="sec fit" onclick="addOpt(${i})" ${q.options.length >= 8 ? 'disabled' : ''}>+ Pilihan</button>
+     <label class="ck"><input type="checkbox" ${q.multi ? 'checked' : ''} onchange="Q.questions[${i}].multi=this.checked"> Pemain harus pilih SEMUA jawaban benar</label></div>`
+    : `<textarea placeholder="Jawaban yang diterima, satu per baris (tidak peka huruf besar/kecil)${q.type === 'buzz' ? '. Untuk rebutan ini hanya referensi host; host yang menilai benar/salah.' : ''}" oninput="Q.questions[${i}].accepted=this.value.split('\\n')">${esc((q.accepted || []).join('\n'))}</textarea>`;
+  return `<div class="q-edit"><div class="row"><b class="fit">Soal ${i + 1}</b>
+    <select onchange="Q.questions[${i}].type=this.value;editor()">
+      <option value="mc" ${q.type === 'mc' ? 'selected' : ''}>Pilihan ganda</option>
+      <option value="buzz" ${q.type === 'buzz' ? 'selected' : ''}>Rebutan (buzzer)</option>
+      <option value="text" ${q.type === 'text' ? 'selected' : ''}>Isian singkat</option></select>
+    <button class="fit sec" onclick="mv(${i},-1)">↑</button><button class="fit sec" onclick="mv(${i},1)">↓</button>
+    <button class="fit sec" onclick="dup(${i})">Duplikat</button><button class="fit red" onclick="rmQ(${i})">Hapus</button></div>
+    <textarea placeholder="Teks soal" oninput="Q.questions[${i}].text=this.value">${esc(q.text)}</textarea>
+    <input placeholder="URL gambar (opsional)" value="${esc(q.image)}" oninput="Q.questions[${i}].image=this.value">
+    <div class="row" style="margin:8px 0">
+      <label>Sesi (opsional)<input value="${esc(q.session || '')}" placeholder="mis. Babak 1" oninput="Q.questions[${i}].session=this.value"></label>
+      <label>Waktu (detik)<input type="number" min="5" value="${q.time}" oninput="Q.questions[${i}].time=+this.value"></label>
+      <label>Poin<input type="number" min="0" value="${q.points}" oninput="Q.questions[${i}].points=+this.value"></label>
+      <label>Pengurang jika salah<input type="number" min="0" value="${q.penalty}" oninput="Q.questions[${i}].penalty=+this.value"></label>
+      <label class="ck"><input type="checkbox" ${q.speedBonus ? 'checked' : ''} onchange="Q.questions[${i}].speedBonus=this.checked"> Bonus kecepatan</label></div>
+    ${opts}</div>`;
+}
+const addQ = () => { Q.questions.push(blank()); editor(); };
+const rmQ = (i) => { Q.questions.splice(i, 1); editor(); };
+const dup = (i) => { Q.questions.splice(i + 1, 0, JSON.parse(JSON.stringify(Q.questions[i]))); editor(); };
+const mv = (i, d) => { const j = i + d; if (j < 0 || j >= Q.questions.length) return; [Q.questions[i], Q.questions[j]] = [Q.questions[j], Q.questions[i]]; editor(); };
+const addOpt = (i) => { Q.questions[i].options.push(''); editor(); };
+const rmOpt = (i, j) => { const q = Q.questions[i]; q.options.splice(j, 1); q.correct = q.correct.filter((x) => x !== j).map((x) => (x > j ? x - 1 : x)); editor(); };
+const tog = (i, j, on) => { const q = Q.questions[i]; q.correct = on ? [...new Set([...q.correct, j])] : q.correct.filter((x) => x !== j); };
+async function saveQ() {
+  if (!Q.title.trim()) return alert('Isi judul dulu');
+  for (const [i, q] of Q.questions.entries()) {
+    if (!q.text.trim()) return alert(`Soal ${i + 1} belum ada teksnya`);
+    if (q.type === 'mc' && (q.options.filter((o) => o.trim()).length < 2 || !q.correct.length)) return alert(`Soal ${i + 1}: minimal 2 pilihan & 1 jawaban benar`);
+    if (q.type === 'text' && !q.accepted.some((a) => a.trim())) return alert(`Soal ${i + 1}: isi jawaban yang diterima`);
+  }
+  await api('/api/quizzes', Q); list();
+}
+function exportJson() {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(Q, null, 2)], { type: 'application/json' }));
+  a.download = (Q.title || 'quiz') + '.json'; a.click();
+}
+function importJson() {
+  const i = document.createElement('input'); i.type = 'file'; i.accept = '.json';
+  i.onchange = async () => {
+    try { const q = JSON.parse(await i.files[0].text()); delete q.id; await api('/api/quizzes', q); list(); } catch { alert('JSON tidak valid'); }
+  };
+  i.click();
+}
+
+// ---------- game ----------
+function resume() {
+  if (es) es.close();
+  es = new EventSource(`/events?pin=${room.pin}&role=host&token=${room.token}`);
+  es.onmessage = (e) => { S = JSON.parse(e.data); game(); };
+  es.onerror = () => setTimeout(() => { if (es.readyState === 2 && !leaving) { localStorage.removeItem('quiz-host'); room = null; list(); } }, 300);
+}
+const act = (o) => api('/api/act', { role: 'host', pin: room.pin, token: room.token, ...o });
+function leave() { if (confirm('Tutup game ini?')) { localStorage.removeItem('quiz-host'); room = null; list(); } }
+
+const optLetter = (i) => String.fromCharCode(65 + i);
+let displayWin = null;
+function openDisplay() { displayWin = window.open('/display.html?pin=' + room.pin, 'quiz-display'); }
+function ansText(p, q) {
+  if (!p.answered) return '<span class="small">belum</span>';
+  if (q.type === 'mc') return [].concat(p.answer).map(optLetter).join(',');
+  return esc(p.answer);
+}
+
+function game() {
+  const q = S.q;
+  const bar = `<div class="row" style="margin-bottom:10px"><span class="small">PIN <b>${S.pin}</b> · ${esc(S.title)}</span>
+    <span class="fit"><button class="sec" onclick="openDisplay()">🖥️ Buka layar tampilan</button></span></div>`;
+  let h = '';
+  if (S.phase === 'lobby') {
+    const url = location.origin + '/?pin=' + S.pin;
+    h = `<div class="center"><h2>${esc(S.title)}</h2><p>Pemain buka <b>${location.origin}</b> lalu masukkan PIN</p><div class="big">${S.pin}</div>
+    <p class="small">${esc(url)}</p></div><div class="chips center">${S.players.map((p) => `<span>${esc(p.name)} <a href="#" style="color:#fff" onclick="act({type:'kick',id:'${p.id}'});return false">✕</a></span>`).join('') || 'Menunggu pemain…'}</div>
+    <div class="center"><br><button onclick="act({type:'start'})" ${S.players.length ? '' : 'disabled'}>Mulai (${S.players.length} pemain)</button> <button class="sec" onclick="leave()">Tutup</button></div>`;
+  } else if (S.phase === 'interim') {
+    h = `<div class="center"><h1>📊 Skor Sementara</h1><p>Sesi ${S.sessionNo}/${S.sessionCount} selesai${S.session ? ': <b>' + esc(S.session) + '</b>' : ''}</p></div><div class="lb">${S.players.map((p) => `<div><span>#${p.rank} ${esc(p.name)}</span><b>${p.score}</b></div>`).join('')}</div>
+    <div class="center"><br><button style="font-size:1.3rem;padding:14px 28px" onclick="act({type:'next'})">Lanjut ke sesi berikutnya${S.nextSession ? ': ' + esc(S.nextSession) : ''} ▶</button></div>`;
+  } else if (S.phase === 'end') {
+    h = `<div class="center"><h1>🏆 Hasil Akhir</h1></div><div class="lb">${S.players.map((p) => `<div><span>#${p.rank} ${esc(p.name)}</span><b>${p.score}</b></div>`).join('')}</div>
+    <div class="center"><br><a href="/api/games/${S.gameId}/export.xlsx"><button class="green">Unduh hasil (Excel)</button></a> <button onclick="leave()">Selesai</button></div>`;
+  } else {
+    const cd = S.phase === 'countdown';
+    const typeName = { mc: 'Pilihan ganda', buzz: 'Rebutan', text: 'Isian' }[q.type];
+    h = `<div class="row"><span class="small">Soal ${S.qi + 1}/${S.count} · ${typeName} · ${q.points} poin${q.penalty ? ` · salah −${q.penalty}` : ''}</span><span class="fit">${cd ? 'Dimulai dalam <b id="cd" style="font-size:1.6rem"></b>' : '<b id="sec" style="font-size:1.6rem"></b>'}</span></div>
+    <div class="bar"><i id="bar"></i></div>
+    <div class="card"><h2 style="margin-top:0">${esc(q.text)}</h2>
+    <div class="small" style="margin-bottom:6px">KUNCI JAWABAN${q.multi ? ' (pemain harus pilih semua)' : ''}</div>`;
+    if (q.type === 'mc') h += q.options.map((o, i) => `<div style="padding:6px 10px;margin:3px 0;border-radius:6px;${q.correct.includes(i) ? 'background:#d7f5d0;font-weight:700' : 'background:#f1f1f1'}">${optLetter(i)}. ${esc(o)} ${q.correct.includes(i) ? '✅' : ''}</div>`).join('');
+    else h += `<div style="padding:8px 10px;border-radius:6px;background:#d7f5d0;font-weight:700">${q.accepted?.length ? esc(q.accepted.join(' / ')) : '<span class="small">(tidak ada kunci tertulis)</span>'}</div>`;
+    h += `</div>`;
+    if (cd) h += `<div class="center small">Pemain sedang melihat hitung mundur…</div>`;
+    else if (S.phase === 'question') {
+      if (q.type === 'buzz') {
+        h += S.buzz ? `<div class="card center" style="color:#222"><h2>${esc(S.buzz.name)} menjawab</h2><div class="row"><button class="green" onclick="act({type:'judge',correct:true})">✅ Benar</button><button class="red" onclick="act({type:'judge',correct:false})">❌ Salah</button></div></div>`
+          : `<div class="center small">Menunggu ada yang menekan tombol…</div>`;
+      }
+      h += `<div class="center" style="position:sticky;bottom:0;padding:10px;background:#46178f"><button class="sec" onclick="act({type:'skip'})">Akhiri soal &amp; tampilkan jawaban</button></div>`;
+    } else {
+      h += `<div class="center" style="position:sticky;bottom:0;padding:10px;background:#46178f"><button style="font-size:1.3rem;padding:14px 28px" onclick="act({type:'next'})">${S.qi + 1 >= S.count ? 'Hasil akhir ▶' : S.sessionEnds ? 'Skor sementara ▶' : 'Soal berikutnya ▶'}</button></div>`;
+    }
+    h += `<div class="card" style="color:#222;margin-top:12px"><div class="small" style="margin-bottom:4px">PEMAIN ${q.type === 'buzz' ? '' : `· ${S.players.filter((p) => p.answered).length}/${S.players.length} sudah menjawab`}</div>
+    <table style="width:100%;border-collapse:collapse"><tr style="text-align:left"><th>#</th><th>Nama</th><th>Skor</th>${q.type === 'buzz' ? '<th>Status</th>' : '<th>Jawaban</th>'}<th></th></tr>
+    ${S.players.map((p) => {
+      const ok = q.type === 'mc' ? (p.answered && S.phase === 'reveal' && (q.multi ? JSON.stringify([...[].concat(p.answer)].sort()) === JSON.stringify([...q.correct].sort()) : q.correct.includes([].concat(p.answer)[0]))) : null;
+      const st = q.type === 'buzz' ? (S.buzz?.id === p.id ? '🔔 menjawab' : p.locked ? '❌ terkunci' : '') : ansText(p, q);
+      return `<tr style="border-top:1px solid #ddd"><td>${p.rank}</td><td>${esc(p.name)}</td><td>${p.score}${S.phase === 'reveal' && p.delta ? ` <small>(${p.delta > 0 ? '+' : ''}${p.delta})</small>` : ''}</td><td>${st}</td><td>${ok === true ? '✅' : ok === false ? '❌' : ''}</td></tr>`;
+    }).join('')}</table></div>`;
+  }
+  app.innerHTML = `<div class="wrap" style="padding:0">${bar}${h}</div>`;
+  clearInterval(tick);
+  if (S.phase === 'countdown') {
+    deadline = Date.now() + S.countdown;
+    const f = () => { const e = document.getElementById('cd'); if (e) e.textContent = Math.max(1, Math.ceil((deadline - Date.now()) / 1000)); };
+    f(); tick = setInterval(f, 100);
+    return;
+  }
+  if (S.q && S.phase !== 'lobby' && S.phase !== 'end' && S.phase !== 'interim') {
+    deadline = Date.now() + S.remaining;
+    const f = () => {
+      const rem = S.phase === 'question' && !S.paused ? Math.max(0, deadline - Date.now()) : S.remaining;
+      const b = document.getElementById('bar'), s = document.getElementById('sec');
+      if (b) b.style.width = (rem / S.total * 100) + '%';
+      if (s) s.textContent = S.phase === 'question' ? Math.ceil(rem / 1000) + (S.paused ? ' (jeda)' : '') : '';
+    };
+    f(); tick = setInterval(f, 200);
+  }
+}
+
+boot();
+</script></body></html>

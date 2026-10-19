@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Quiz</title><link rel="stylesheet" href="style.css"></head>
+<body><div class="wrap" id="app"></div>
+<script>
+const app = document.getElementById('app');
+const params = new URLSearchParams(location.search);
+let S = null, es = null, sel = [], tick = null, deadline = 0, lastKey = '';
+// browser menutup EventSource saat reload/pindah halaman (readyState 2) — jangan dianggap game hilang
+let leaving = false;
+addEventListener('beforeunload', () => { leaving = true; });
+addEventListener('pagehide', () => { leaving = true; });
+addEventListener('pageshow', () => { leaving = false; });
+const sess = JSON.parse(localStorage.getItem('quiz-session') || 'null');
+
+const api = (url, body) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then((r) => r.json());
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+function joinScreen(err) {
+  app.innerHTML = `<div class="center"><h1>🎯 Quiz</h1>
+  <div class="card"><input id="pin" placeholder="PIN game" inputmode="numeric" value="${esc(params.get('pin') || '')}">
+  <br><br><input id="name" placeholder="Nama kamu" maxlength="20"><br><br>
+  <button id="go" style="width:100%">Masuk</button>
+  <div class="err">${esc(err || '')}</div></div>
+  <p class="small"><a href="/host" style="color:#fff">Buat / host quiz</a></p></div>`;
+  document.getElementById('go').onclick = async () => {
+    const r = await api('/api/join', { pin: document.getElementById('pin').value.trim(), name: document.getElementById('name').value });
+    if (r.error) return joinScreen(r.error);
+    localStorage.setItem('quiz-session', JSON.stringify({ pin: r.pin, id: r.id }));
+    connect(r);
+  };
+}
+
+function connect(s) {
+  if (es) es.close();
+  es = new EventSource(`/events?pin=${s.pin}&role=player&id=${s.id}`);
+  es.onmessage = (e) => { S = JSON.parse(e.data); if (S.gone) { localStorage.removeItem('quiz-session'); es.close(); return joinScreen('Kamu sudah keluar dari game'); } sess2 = s; render(); };
+  es.onerror = () => setTimeout(() => { if (es.readyState === 2 && !leaving) { localStorage.removeItem('quiz-session'); joinScreen('Game tidak ditemukan'); } }, 300);
+}
+let sess2 = null;
+const act = (o) => api('/api/act', { role: 'player', pin: sess2.pin, id: sess2.id, ...o });
+
+function render() {
+  const key = [S.phase, S.qi, S.you.answered, S.you.locked, S.buzz?.id, S.paused].join('|');
+  if (key !== lastKey) { sel = []; lastKey = key; }
+  const y = S.you;
+  let h = `<div class="row"><b class="fit">${esc(y.name)}</b><span class="fit">${y.score} poin${S.phase !== 'lobby' ? ` · #${y.rank}` : ''}</span></div>`;
+  const q = S.q;
+  if (S.phase === 'lobby') h += `<div class="center card" style="color:#222"><h2>Kamu sudah masuk!</h2><p>Tunggu host memulai game…</p><p>${S.players.length} pemain</p></div>`;
+  else if (S.phase === 'countdown') h += `<div class="center"><h2>Soal ${S.qi + 1}/${S.count}</h2><div class="big" id="cd" style="font-size:8rem"></div><h2>Bersiap…</h2></div>`;
+  else if (S.phase === 'interim') h += `<div class="center"><h1>📊 Skor Sementara</h1><h2>Peringkat kamu: #${y.rank}</h2><h2>${y.score} poin</h2></div><div class="lb">${S.players.slice(0, 5).map((p) => `<div><span>#${p.rank} ${esc(p.name)}</span><b>${p.score}</b></div>`).join('')}</div><p class="center small">Tunggu host melanjutkan sesi berikutnya…</p>`;
+  else if (S.phase === 'end') {
+    h += `<div class="center"><h1>Selesai!</h1><h2>Peringkat kamu: #${y.rank}</h2><h2>${y.score} poin</h2></div><div class="lb">${S.players.slice(0, 5).map((p) => `<div><span>#${p.rank} ${esc(p.name)}</span><b>${p.score}</b></div>`).join('')}</div>`;
+  } else {
+    h += `<div class="bar"><i id="bar"></i></div><div class="center"><span id="sec" class="big" style="font-size:1.6rem"></span></div>`;
+    h += `<h2 class="center">${esc(q.text)}</h2>${q.image ? `<img class="qimg" src="${esc(q.image)}">` : ''}`;
+    if (S.phase === 'question') {
+      if (q.type === 'mc') {
+        if (y.answered) h += `<div class="center card" style="color:#222">Jawaban terkirim. Menunggu…</div>`;
+        else {
+          h += `<div class="opts">${q.options.map((o, i) => `<div class="opt c${i} ${sel.includes(i) ? 'sel' : ''}" onclick="pick(${i})">${esc(o)}</div>`).join('')}</div>`;
+          if (q.multi) h += `<button style="width:100%" onclick="sendMc()" ${sel.length ? '' : 'disabled'}>Kirim (${sel.length} dipilih)</button><p class="small center">Bisa lebih dari satu jawaban benar</p>`;
+        }
+      } else if (q.type === 'text') {
+        h += y.answered ? `<div class="center card" style="color:#222">Jawaban terkirim. Menunggu…</div>`
+          : `<div class="row"><input id="txt" placeholder="Ketik jawabanmu" autocomplete="off"><button class="fit" onclick="sendTxt()">Kirim</button></div>`;
+      } else {
+        if (S.buzz) h += S.buzz.id === y.id ? `<div class="center card" style="color:#222"><h2>Kamu yang jawab!</h2><p>Sebutkan jawabanmu ke host.</p></div>` : `<div class="center card" style="color:#222"><h2>${esc(S.buzz.name)} menekan duluan</h2></div>`;
+        else if (y.locked) h += `<div class="center card" style="color:#222">Kamu salah, tunggu yang lain…</div>`;
+        else h += `<button class="buzz" onclick="act({type:'buzz'})">REBUT!</button>`;
+      }
+    } else {
+      const d = y.delta;
+      if (q.type === 'buzz') h += `<div class="center card" style="color:#222"><h2>${d > 0 ? '✅ Benar! +' + d : d < 0 ? '❌ ' + d : 'Waktu habis / bukan kamu'}</h2></div>`;
+      else h += `<div class="center card" style="color:#222"><h2>${!y.answered ? '⏰ Tidak menjawab' : y.correct ? '✅ Benar! +' + d : '❌ Salah' + (d ? ' ' + d : '')}</h2></div>`;
+      if (q.type === 'mc') h += `<div class="opts">${q.options.map((o, i) => `<div class="opt c${i} ${q.correct.includes(i) ? 'ok' : 'dim'}">${esc(o)}</div>`).join('')}</div>`;
+      else if (q.accepted?.length) h += `<div class="center">Jawaban: <b>${esc(q.accepted.join(' / '))}</b></div>`;
+    }
+  }
+  app.innerHTML = h;
+  startTick();
+}
+function pick(i) {
+  if (S.q.multi) { sel = sel.includes(i) ? sel.filter((x) => x !== i) : [...sel, i]; render(); }
+  else act({ type: 'answer', value: [i] });
+}
+const sendMc = () => act({ type: 'answer', value: sel });
+const sendTxt = () => { const v = document.getElementById('txt').value.trim(); if (v) act({ type: 'answer', value: v }); };
+document.addEventListener('keydown', (e) => { if (e.key === 'Enter' && document.getElementById('txt')) sendTxt(); });
+
+function startTick() {
+  clearInterval(tick);
+  if (S.phase === 'countdown') {
+    deadline = Date.now() + S.countdown;
+    const f = () => { const e = document.getElementById('cd'); if (e) e.textContent = Math.max(1, Math.ceil((deadline - Date.now()) / 1000)); };
+    f(); tick = setInterval(f, 100);
+    return;
+  }
+  if (!S.q || S.phase === 'end' || S.phase === 'interim') return;
+  deadline = Date.now() + S.remaining;
+  const f = () => {
+    const rem = S.phase === 'question' && !S.paused ? Math.max(0, deadline - Date.now()) : S.remaining;
+    const b = document.getElementById('bar'), s = document.getElementById('sec');
+    if (b) b.style.width = (rem / S.total * 100) + '%';
+    if (s) s.textContent = S.phase === 'question' ? Math.ceil(rem / 1000) + (S.paused ? ' (jeda)' : '') : '';
+  };
+  f(); tick = setInterval(f, 200);
+}
+
+if (sess) connect(sess); else joinScreen();
+</script></body></html>

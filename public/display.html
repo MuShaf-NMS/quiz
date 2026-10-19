@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Layar Quiz</title><link rel="stylesheet" href="style.css">
+<style>.wrap{max-width:1200px}h1.q{font-size:2.6rem;text-align:center}.opt{font-size:1.8rem;padding:34px 14px}.lb div{font-size:1.4rem}.big{font-size:5rem}.tm{font-size:3rem}</style></head>
+<body><div class="wrap" id="app"><p class="center">Menghubungkan…</p></div>
+<script>
+const app = document.getElementById('app');
+const pin = new URLSearchParams(location.search).get('pin');
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+let S, tick, deadline;
+const es = new EventSource('/events?pin=' + encodeURIComponent(pin) + '&role=display');
+es.onmessage = (e) => { S = JSON.parse(e.data); render(); };
+es.onerror = () => { if (es.readyState === 2) app.innerHTML = '<h1 class="center">Game tidak ditemukan</h1>'; };
+
+function render() {
+  const q = S.q;
+  let h = '';
+  if (S.phase === 'lobby') {
+    h = `<div class="center"><h2>${esc(S.title)}</h2><p style="font-size:1.6rem">Buka <b>${esc(location.host)}</b> dan masukkan PIN</p>
+    <div class="big">${S.pin}</div></div><div class="chips center" style="font-size:1.4rem">${S.players.map((p) => `<span>${esc(p.name)}</span>`).join('') || 'Menunggu pemain…'}</div>`;
+  } else if (S.phase === 'countdown') {
+    h = `<div class="center" style="padding-top:6vh"><h1>Soal ${S.qi + 1} dari ${S.count}</h1><div class="big" id="cd" style="font-size:14rem;line-height:1"></div><h2>Bersiap…</h2></div>`;
+  } else if (S.phase === 'interim') {
+    h = `<div class="center"><h1>📊 Skor Sementara</h1><h2>Sesi ${S.sessionNo} dari ${S.sessionCount} selesai${S.session ? ' — ' + esc(S.session) : ''}</h2></div><div class="lb">${S.players.slice(0, 10).map((p) => `<div><span>#${p.rank} ${esc(p.name)}</span><b>${p.score}</b></div>`).join('')}</div><div class="center"><p>Berikutnya: ${esc(S.nextSession || 'sesi selanjutnya')}</p></div>`;
+  } else if (S.phase === 'end') {
+    h = `<div class="center"><h1>🏆 Hasil Akhir</h1></div><div class="lb">${S.players.slice(0, 10).map((p) => `<div><span>#${p.rank} ${esc(p.name)}</span><b>${p.score}</b></div>`).join('')}</div>`;
+  } else {
+    const typeName = { mc: 'Pilihan ganda', buzz: 'Rebutan', text: 'Isian singkat' }[q.type];
+    h = `<div class="row"><span>Soal ${S.qi + 1}/${S.count} · ${typeName} · ${q.points} poin</span><span class="fit">PIN ${S.pin}</span></div>
+    <div class="bar"><i id="bar"></i></div><div class="center"><span id="sec" class="big tm"></span></div>
+    <h1 class="q">${esc(q.text)}</h1>${q.image ? `<img class="qimg" src="${esc(q.image)}">` : ''}`;
+    const rev = S.phase === 'reveal';
+    if (q.type === 'mc') h += `<div class="opts">${q.options.map((o, i) => `<div class="opt c${i} ${rev ? (q.correct.includes(i) ? 'ok' : 'dim') : ''}">${esc(o)}</div>`).join('')}</div>${q.multi && !rev ? '<p class="center">Pilih SEMUA jawaban yang benar</p>' : ''}`;
+    else if (q.type === 'text' && !rev) h += `<p class="center" style="font-size:1.6rem">Ketik jawabanmu di HP</p>`;
+    if (rev && q.type !== 'mc' && q.accepted?.length) h += `<div class="center" style="font-size:2rem">Jawaban: <b>${esc(q.accepted.join(' / '))}</b></div>`;
+    if (!rev) {
+      if (q.type === 'buzz') h += S.buzz ? `<div class="center card" style="color:#222"><h1>${esc(S.buzz.name)} menjawab…</h1></div>` : `<p class="center" style="font-size:1.6rem">Tekan tombol REBUT di HP!</p>`;
+      else h += `<p class="center" style="font-size:1.4rem">${S.players.filter((p) => p.answered).length}/${S.players.length} sudah menjawab</p>`;
+    } else {
+      h += `<div class="lb">${S.players.slice(0, 8).map((p) => `<div><span>#${p.rank} ${esc(p.name)}</span><b>${p.score}${p.delta ? ` <small>(${p.delta > 0 ? '+' : ''}${p.delta})</small>` : ''}</b></div>`).join('')}</div>`;
+    }
+  }
+  app.innerHTML = h;
+  clearInterval(tick);
+  if (S.phase === 'countdown') {
+    deadline = Date.now() + S.countdown;
+    const f = () => { const e = document.getElementById('cd'); if (e) e.textContent = Math.max(1, Math.ceil((deadline - Date.now()) / 1000)); };
+    f(); tick = setInterval(f, 100);
+    return;
+  }
+  if (q && S.phase !== 'lobby' && S.phase !== 'end') {
+    deadline = Date.now() + S.remaining;
+    const f = () => {
+      const rem = S.phase === 'question' && !S.paused ? Math.max(0, deadline - Date.now()) : S.remaining;
+      const b = document.getElementById('bar'), s = document.getElementById('sec');
+      if (b) b.style.width = (rem / S.total * 100) + '%';
+      if (s) s.textContent = S.phase === 'question' ? Math.ceil(rem / 1000) : '';
+    };
+    f(); tick = setInterval(f, 200);
+  }
+}
+</script></body></html>
