@@ -7,6 +7,7 @@ const PORT = process.env.PORT || 3000;
 const PUB = path.join(__dirname, 'public');
 const { Pool } = require('pg');
 const xlsx = require('./xlsx');
+const QRCode = require('qrcode');
 const { DB_USER, DB_PASSWORD, DB_HOST = 'localhost', DB_PORT = 5432, DB_NAME = 'quiz', ADMIN_USERNAME = 'admin' } = process.env;
 if (!process.env.DATABASE_URL && !(DB_USER && DB_PASSWORD)) {
   console.error('Kredensial database belum diatur: isi DB_USER dan DB_PASSWORD (atau DATABASE_URL) di .env, lihat .env.example');
@@ -231,7 +232,7 @@ function view(r, role, pid) {
   const ranked = [...r.players.values()].sort((a, b) => b.score - a.score);
   const v = {
     pin: r.pin, gameId: isHost ? r.gameId : undefined, phase: r.phase, title: r.quiz.title, qi: r.qi, count: r.quiz.questions.length,
-    players: ranked.map((p, i) => ({ id: p.id, name: p.name, score: p.score, rank: i + 1,
+    players: ranked.map((p, i) => ({ id: p.id, name: p.name, avatar: p.avatar, score: p.score, rank: i + 1,
       answered: r.answers.has(p.id), delta: r.deltas.get(p.id) || 0,
       answer: isHost && r.answers.has(p.id) ? r.answers.get(p.id).value : undefined,
       locked: isHost ? r.locked.has(p.id) : undefined })),
@@ -261,7 +262,7 @@ function view(r, role, pid) {
   if (role === 'player') {
     const me = r.players.get(pid);
     if (!me) return { ...v, gone: true };
-    v.you = { id: me.id, name: me.name, score: me.score, rank: ranked.indexOf(me) + 1, delta: r.deltas.get(pid) || 0,
+    v.you = { id: me.id, name: me.name, avatar: me.avatar, score: me.score, rank: ranked.indexOf(me) + 1, delta: r.deltas.get(pid) || 0,
       answered: r.answers.has(pid), answer: r.answers.has(pid) ? r.answers.get(pid).value : null,
       locked: r.locked.has(pid) };
     if (r.phase === 'reveal' && r.q.type !== 'buzz' && r.answers.has(pid)) v.you.correct = isCorrect(r.q, r.answers.get(pid).value);
@@ -318,6 +319,29 @@ function resume(r) {
   clearTimeout(r.timer);
   r.timer = setTimeout(() => { reveal(r); push(r); }, r.remaining);
 }
+
+// ---------- avatar (proxy + cache DiceBear) & QR ----------
+const AVATAR_URL = process.env.DICEBEAR_URL || 'https://api.dicebear.com/10.x/clay/svg';
+const AVATAR_CACHE_MAX = 2000;
+const avatarCache = new Map(); // seed -> Promise<string|null>
+const fallbackAvatar = (seed) => {
+  const hue = [...seed].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7);
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="50" fill="hsl(${hue} 70% 65%)"/>`
+    + '<circle cx="35" cy="42" r="6" fill="#222"/><circle cx="65" cy="42" r="6" fill="#222"/>'
+    + '<path d="M30 62q20 20 40 0" stroke="#222" stroke-width="6" fill="none" stroke-linecap="round"/></svg>';
+};
+function avatarSvg(seed) {
+  if (!avatarCache.has(seed)) {
+    const p = fetch(`${AVATAR_URL}?seed=${encodeURIComponent(seed)}`, { signal: AbortSignal.timeout(5000) })
+      .then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+      .catch((e) => { avatarCache.delete(seed); console.error('avatar', seed, e.message); return null; });
+    if (avatarCache.size >= AVATAR_CACHE_MAX) avatarCache.delete(avatarCache.keys().next().value);
+    avatarCache.set(seed, p);
+  }
+  return avatarCache.get(seed);
+}
+const randomSeed = () => crypto.randomBytes(6).toString('hex');
+const validSeed = (s) => /^[\w-]{1,24}$/.test(String(s || ''));
 
 // ---------- http ----------
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css' };
@@ -493,7 +517,7 @@ async function handle(req, res) {
     if (r.phase !== 'lobby') return json(res, 400, { error: 'Game sudah dimulai' });
     if ([...r.players.values()].some((x) => norm(x.name) === norm(name))) return json(res, 400, { error: 'Nama sudah dipakai' });
     const id = uid();
-    r.players.set(id, { id, name, score: 0, correct: 0, wrong: 0 });
+    r.players.set(id, { id, name, avatar: validSeed(b.avatar) ? String(b.avatar) : randomSeed(), score: 0, correct: 0, wrong: 0 });
     push(r);
     return json(res, 200, { id, pin: r.pin });
   }
@@ -505,6 +529,18 @@ async function handle(req, res) {
     else act(r, 'player', b.id, b);
     push(r);
     return json(res, 200, { ok: true });
+  }
+
+  if ((m = p.match(/^\/avatar\/([\w-]{1,24})\.svg$/))) {
+    const svg = await avatarSvg(m[1]);
+    res.writeHead(200, { 'Content-Type': 'image/svg+xml', 'Cache-Control': svg ? 'public, max-age=86400' : 'public, max-age=30' });
+    return res.end(svg || fallbackAvatar(m[1]));
+  }
+  if (p === '/qr.svg') {
+    const target = u.searchParams.get('u') || '';
+    if (!/^https?:\/\/\S{1,300}$/.test(target)) return json(res, 400, { error: 'URL tidak valid' });
+    res.writeHead(200, { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public, max-age=3600' });
+    return res.end(await QRCode.toString(target, { type: 'svg', margin: 2, errorCorrectionLevel: 'M' }));
   }
 
   // static

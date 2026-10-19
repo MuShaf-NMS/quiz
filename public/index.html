@@ -1,11 +1,13 @@
 <!doctype html>
 <html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Quiz</title><link rel="stylesheet" href="style.css"></head>
-<body><div class="wrap" id="app"></div>
+<body><button id="snd" class="snd" onclick="toggleSnd()"></button><div class="wrap" id="app"></div>
+<script src="fx.js"></script>
+<script src="avatar.js"></script>
 <script>
 const app = document.getElementById('app');
 const params = new URLSearchParams(location.search);
-let S = null, es = null, sel = [], tick = null, deadline = 0, lastKey = '';
+let S = null, es = null, sel = [], tick = null, deadline = 0, lastKey = '', avatarSeed = newSeed(), enterKey = '', lastNum = null, winTimer = null;
 // browser menutup EventSource saat reload/pindah halaman (readyState 2) — jangan dianggap game hilang
 let leaving = false;
 addEventListener('beforeunload', () => { leaving = true; });
@@ -13,18 +15,25 @@ addEventListener('pagehide', () => { leaving = true; });
 addEventListener('pageshow', () => { leaving = false; });
 const sess = JSON.parse(localStorage.getItem('quiz-session') || 'null');
 
+const snd = document.getElementById('snd');
+const sndLabel = () => { snd.textContent = fx.isMuted() ? '🔇' : '🔊'; };
+function toggleSnd() { fx.unlock(); fx.toggleMute(); sndLabel(); }
+addEventListener('pointerdown', () => fx.unlock(), { once: true });
+sndLabel();
+
 const api = (url, body) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then((r) => r.json());
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 function joinScreen(err) {
   app.innerHTML = `<div class="center"><h1>🎯 Quiz</h1>
-  <div class="card"><input id="pin" placeholder="PIN game" inputmode="numeric" value="${esc(params.get('pin') || '')}">
+  <div class="card"><div class="avpick">${avatar(avatarSeed, 'xl')}<br><button class="sec" id="dice" type="button">🎲 Acak avatar</button></div><input id="pin" placeholder="PIN game" inputmode="numeric" value="${esc(params.get('pin') || '')}">
   <br><br><input id="name" placeholder="Nama kamu" maxlength="20"><br><br>
   <button id="go" style="width:100%">Masuk</button>
   <div class="err">${esc(err || '')}</div></div>
   <p class="small"><a href="/host" style="color:#fff">Buat / host quiz</a></p></div>`;
+  document.getElementById('dice').onclick = () => { avatarSeed = newSeed(); document.querySelector('.avpick .av').src = avatarSrc(avatarSeed); };
   document.getElementById('go').onclick = async () => {
-    const r = await api('/api/join', { pin: document.getElementById('pin').value.trim(), name: document.getElementById('name').value });
+    const r = await api('/api/join', { pin: document.getElementById('pin').value.trim(), name: document.getElementById('name').value, avatar: avatarSeed });
     if (r.error) return joinScreen(r.error);
     localStorage.setItem('quiz-session', JSON.stringify({ pin: r.pin, id: r.id }));
     connect(r);
@@ -38,22 +47,40 @@ function connect(s) {
   es.onerror = () => setTimeout(() => { if (es.readyState === 2 && !leaving) { localStorage.removeItem('quiz-session'); joinScreen('Game tidak ditemukan'); } }, 300);
 }
 let sess2 = null;
+
+function backHome() {
+  if (es) es.close();
+  clearInterval(tick); clearTimeout(winTimer);
+  localStorage.removeItem('quiz-session');
+  params.delete('pin'); history.replaceState(null, '', '/');
+  S = null; sess2 = null; enterKey = ''; lastKey = ''; avatarSeed = newSeed();
+  document.body.classList.remove('win');
+  app.className = 'wrap';
+  joinScreen();
+}
 const act = (o) => api('/api/act', { role: 'player', pin: sess2.pin, id: sess2.id, ...o });
 
 function render() {
   const key = [S.phase, S.qi, S.you.answered, S.you.locked, S.buzz?.id, S.paused].join('|');
   if (key !== lastKey) { sel = []; lastKey = key; }
   const y = S.you;
-  let h = `<div class="row"><b class="fit">${esc(y.name)}</b><span class="fit">${y.score} poin${S.phase !== 'lobby' ? ` · #${y.rank}` : ''}</span></div>`;
+  const ek = S.phase + '|' + S.qi, enter = ek !== enterKey;
+  enterKey = ek;
+  const win = S.phase === 'end' && y.rank <= 3 && y.score > 0;
+  app.className = 'wrap' + (enter ? ' enter ph-' + S.phase : '');
+  document.body.classList.toggle('win', win);
+  let h = `<div class="row"><b class="fit">${avatar(y.avatar)} ${esc(y.name)}</b><span class="fit">${y.score} poin${S.phase !== 'lobby' ? ` · #${y.rank}` : ''}</span></div>`;
   const q = S.q;
   if (S.phase === 'lobby') h += `<div class="center card" style="color:#222"><h2>Kamu sudah masuk!</h2><p>Tunggu host memulai game…</p><p>${S.players.length} pemain</p></div>`;
   else if (S.phase === 'countdown') h += `<div class="center"><h2>Soal ${S.qi + 1}/${S.count}</h2><div class="big" id="cd" style="font-size:8rem"></div><h2>Bersiap…</h2></div>`;
-  else if (S.phase === 'interim') h += `<div class="center"><h1>📊 Skor Sementara</h1><h2>Peringkat kamu: #${y.rank}</h2><h2>${y.score} poin</h2></div><div class="lb">${S.players.slice(0, 5).map((p) => `<div><span>#${p.rank} ${esc(p.name)}</span><b>${p.score}</b></div>`).join('')}</div><p class="center small">Tunggu host melanjutkan sesi berikutnya…</p>`;
+  else if (S.phase === 'interim') h += `<div class="center"><h1>📊 Skor Sementara</h1><h2>Peringkat kamu: #${y.rank}</h2><h2>${y.score} poin</h2></div><div class="lb">${S.players.slice(0, 5).map((p) => `<div><span>#${p.rank} ${avatar(p.avatar)}${esc(p.name)}</span><b>${p.score}</b></div>`).join('')}</div><p class="center small">Tunggu host melanjutkan sesi berikutnya…</p>`;
   else if (S.phase === 'end') {
-    h += `<div class="center"><h1>Selesai!</h1><h2>Peringkat kamu: #${y.rank}</h2><h2>${y.score} poin</h2></div><div class="lb">${S.players.slice(0, 5).map((p) => `<div><span>#${p.rank} ${esc(p.name)}</span><b>${p.score}</b></div>`).join('')}</div>`;
+    h += (win
+      ? `<div class="winner w${y.rank}"><div class="winav">${avatar(y.avatar, 'xxl')}<div class="medal">${['🥇', '🥈', '🥉'][y.rank - 1]}</div></div><h1>Juara ${y.rank}!</h1><h2>${y.score} poin</h2><p class="small">Selesai! Selamat ya, ${esc(y.name)}</p></div>`
+      : `<div class="center"><h1>Selesai!</h1><h2>Peringkat kamu: #${y.rank}</h2><h2>${y.score} poin</h2></div>`) + `<div class="lb">${S.players.slice(0, 5).map((p) => `<div><span>#${p.rank} ${avatar(p.avatar)}${esc(p.name)}</span><b>${p.score}</b></div>`).join('')}</div><div class="center" style="margin-top:16px"><button onclick="backHome()">🏠 Kembali ke halaman awal</button></div>`;
   } else {
     h += `<div class="bar"><i id="bar"></i></div><div class="center"><span id="sec" class="big" style="font-size:1.6rem"></span></div>`;
-    h += `<h2 class="center">${esc(q.text)}</h2>${q.image ? `<img class="qimg" src="${esc(q.image)}">` : ''}`;
+    h += `<h2 class="center qt">${esc(q.text)}</h2>${q.image ? `<img class="qimg" src="${esc(q.image)}">` : ''}`;
     if (S.phase === 'question') {
       if (q.type === 'mc') {
         if (y.answered) h += `<div class="center card" style="color:#222">Jawaban terkirim. Menunggu…</div>`;
@@ -78,7 +105,20 @@ function render() {
     }
   }
   app.innerHTML = h;
+  if (enter) enterEffects(win);
   startTick();
+}
+
+// suara & efek yang hanya sekali per pergantian fase
+function enterEffects(win) {
+  clearTimeout(winTimer);
+  const y = S.you;
+  if (S.phase === 'question') fx.go();
+  else if (S.phase === 'reveal') {
+    const d = y.delta;
+    if (d > 0 || y.correct) fx.correct();
+    else if (d < 0 || (y.answered && y.correct === false)) fx.wrong();
+  } else if (S.phase === 'end' && win) winTimer = setTimeout(() => { fx.fanfare(); fx.confetti(); }, 700);
 }
 function pick(i) {
   if (S.q.multi) { sel = sel.includes(i) ? sel.filter((x) => x !== i) : [...sel, i]; render(); }
@@ -92,8 +132,14 @@ function startTick() {
   clearInterval(tick);
   if (S.phase === 'countdown') {
     deadline = Date.now() + S.countdown;
-    const f = () => { const e = document.getElementById('cd'); if (e) e.textContent = Math.max(1, Math.ceil((deadline - Date.now()) / 1000)); };
-    f(); tick = setInterval(f, 100);
+    const f = () => {
+      const e = document.getElementById('cd');
+      if (!e) return;
+      const n = Math.max(1, Math.ceil((deadline - Date.now()) / 1000));
+      e.textContent = n;
+      if (n !== lastNum) { lastNum = n; e.classList.remove('pop'); void e.offsetWidth; e.classList.add('pop'); fx.tick(); }
+    };
+    lastNum = null; f(); tick = setInterval(f, 100);
     return;
   }
   if (!S.q || S.phase === 'end' || S.phase === 'interim') return;

@@ -2,6 +2,7 @@
 <html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Quiz Host</title><link rel="stylesheet" href="style.css"></head>
 <body><div class="wrap" id="app"></div>
+<script src="avatar.js"></script>
 <script>
 const app = document.getElementById('app');
 const api = (url, body, method) => fetch(url, { method: method || 'POST', headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined }).then((r) => r.json());
@@ -224,13 +225,13 @@ function game() {
   if (S.phase === 'lobby') {
     const url = location.origin + '/?pin=' + S.pin;
     h = `<div class="center"><h2>${esc(S.title)}</h2><p>Pemain buka <b>${location.origin}</b> lalu masukkan PIN</p><div class="big">${S.pin}</div>
-    <p class="small">${esc(url)}</p></div><div class="chips center">${S.players.map((p) => `<span>${esc(p.name)} <a href="#" style="color:#fff" onclick="act({type:'kick',id:'${p.id}'});return false">✕</a></span>`).join('') || 'Menunggu pemain…'}</div>
+    <p class="small">${esc(url)}</p></div><div class="chips center">${S.players.map((p) => `<span>${avatar(p.avatar)}${esc(p.name)} <a href="#" style="color:#fff" onclick="act({type:'kick',id:'${p.id}'});return false">✕</a></span>`).join('') || 'Menunggu pemain…'}</div>
     <div class="center"><br><button onclick="act({type:'start'})" ${S.players.length ? '' : 'disabled'}>Mulai (${S.players.length} pemain)</button> <button class="sec" onclick="leave()">Tutup</button></div>`;
   } else if (S.phase === 'interim') {
-    h = `<div class="center"><h1>📊 Skor Sementara</h1><p>Sesi ${S.sessionNo}/${S.sessionCount} selesai${S.session ? ': <b>' + esc(S.session) + '</b>' : ''}</p></div><div class="lb">${S.players.map((p) => `<div><span>#${p.rank} ${esc(p.name)}</span><b>${p.score}</b></div>`).join('')}</div>
+    h = `<div class="center"><h1>📊 Skor Sementara</h1><p>Sesi ${S.sessionNo}/${S.sessionCount} selesai${S.session ? ': <b>' + esc(S.session) + '</b>' : ''}</p></div><div class="lb">${S.players.map((p) => `<div><span>#${p.rank} ${avatar(p.avatar)}${esc(p.name)}</span><b>${p.score}</b></div>`).join('')}</div>
     <div class="center"><br><button style="font-size:1.3rem;padding:14px 28px" onclick="act({type:'next'})">Lanjut ke sesi berikutnya${S.nextSession ? ': ' + esc(S.nextSession) : ''} ▶</button></div>`;
   } else if (S.phase === 'end') {
-    h = `<div class="center"><h1>🏆 Hasil Akhir</h1></div><div class="lb">${S.players.map((p) => `<div><span>#${p.rank} ${esc(p.name)}</span><b>${p.score}</b></div>`).join('')}</div>
+    h = `<div class="center"><h1>🏆 Hasil Akhir</h1></div><div class="lb">${S.players.map((p) => `<div><span>#${p.rank} ${avatar(p.avatar)}${esc(p.name)}</span><b>${p.score}</b></div>`).join('')}</div>
     <div class="center"><br><a href="/api/games/${S.gameId}/export.xlsx"><button class="green">Unduh hasil (Excel)</button></a> <button onclick="leave()">Selesai</button></div>`;
   } else {
     const cd = S.phase === 'countdown';
@@ -257,7 +258,7 @@ function game() {
     ${S.players.map((p) => {
       const ok = q.type === 'mc' ? (p.answered && S.phase === 'reveal' && (q.multi ? JSON.stringify([...[].concat(p.answer)].sort()) === JSON.stringify([...q.correct].sort()) : q.correct.includes([].concat(p.answer)[0]))) : null;
       const st = q.type === 'buzz' ? (S.buzz?.id === p.id ? '🔔 menjawab' : p.locked ? '❌ terkunci' : '') : ansText(p, q);
-      return `<tr style="border-top:1px solid #ddd"><td>${p.rank}</td><td>${esc(p.name)}</td><td>${p.score}${S.phase === 'reveal' && p.delta ? ` <small>(${p.delta > 0 ? '+' : ''}${p.delta})</small>` : ''}</td><td>${st}</td><td>${ok === true ? '✅' : ok === false ? '❌' : ''}</td></tr>`;
+      return `<tr style="border-top:1px solid #ddd"><td>${p.rank}</td><td><span style="display:inline-flex;align-items:center;gap:8px">${avatar(p.avatar)}${esc(p.name)}</span></td><td>${p.score}${S.phase === 'reveal' && p.delta ? ` <small>(${p.delta > 0 ? '+' : ''}${p.delta})</small>` : ''}</td><td>${st}</td><td>${ok === true ? '✅' : ok === false ? '❌' : ''}</td></tr>`;
     }).join('')}</table></div>`;
   }
   app.innerHTML = `<div class="wrap" style="padding:0">${bar}${h}</div>`;
